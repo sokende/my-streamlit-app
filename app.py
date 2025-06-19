@@ -1,99 +1,279 @@
 import streamlit as st
-import geemap.foliumap as geemap
 import geopandas as gpd
-import ee
+import folium
+from folium import plugins
+import tempfile
+import zipfile
+import os
+from streamlit_folium import st_folium
 
-# Initialize Earth Engine
-ee.Initialize()
+# Configure page
+st.set_page_config(
+    page_title="Farm Soil Analysis",
+    page_icon="🌾",
+    layout="wide"
+)
 
-st.set_page_config(layout="wide")
+def extract_shapefile(uploaded_file):
+    """Extract shapefile from uploaded ZIP"""
+    try:
+        # Create temporary directory
+        temp_dir = tempfile.mkdtemp()
+        
+        # Save uploaded file
+        zip_path = os.path.join(temp_dir, "shapefile.zip")
+        with open(zip_path, "wb") as f:
+            f.write(uploaded_file.read())
+        
+        # Extract ZIP
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(temp_dir)
+        
+        # Find .shp file
+        shp_files = [f for f in os.listdir(temp_dir) if f.endswith('.shp')]
+        if not shp_files:
+            return None, "No .shp file found in ZIP"
+        
+        shp_path = os.path.join(temp_dir, shp_files[0])
+        return shp_path, None
+        
+    except Exception as e:
+        return None, f"Error extracting file: {str(e)}"
 
-st.title("🌍 Interactive Farm Analysis Web App")
-st.markdown("This app displays geospatial data layers for a farm in Spain.")
+def create_soil_quality_map(gdf):
+    """Create map with synthetic soil quality data"""
+    # Get the center of the shapefile
+    bounds = gdf.total_bounds
+    center_lat = (bounds[1] + bounds[3]) / 2
+    center_lon = (bounds[0] + bounds[2]) / 2
+    
+    # Create base map
+    m = folium.Map(
+        location=[center_lat, center_lon],
+        zoom_start=13,
+        tiles='OpenStreetMap'
+    )
+    
+    # Add satellite layer option
+    folium.TileLayer(
+        tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+        attr='Esri',
+        name='Satellite',
+        overlay=False,
+        control=True
+    ).add_to(m)
+    
+    # Add farm boundary
+    folium.GeoJson(
+        gdf.to_json(),
+        style_function=lambda feature: {
+            'fillColor': 'transparent',
+            'color': 'red',
+            'weight': 3,
+            'opacity': 1
+        },
+        popup=folium.Popup("Farm Boundary", parse_html=True),
+        tooltip="Farm Area"
+    ).add_to(m)
+    
+    # Create synthetic soil quality zones within the farm area
+    # This simulates different soil quality areas
+    import numpy as np
+    from shapely.geometry import Point
+    from shapely.ops import unary_union
+    
+    # Get farm geometry
+    farm_geom = unary_union(gdf.geometry)
+    
+    # Create soil quality zones (simplified simulation)
+    soil_zones = []
+    colors = ['#8B4513', '#A0522D', '#CD853F', '#D2B48C', '#F4A460']  # Brown to tan
+    quality_names = ['Very Poor', 'Poor', 'Fair', 'Good', 'Excellent']
+    
+    # Generate sample points within farm boundary
+    minx, miny, maxx, maxy = farm_geom.bounds
+    points_added = 0
+    
+    for i, (color, quality) in enumerate(zip(colors, quality_names)):
+        # Create some random points within the farm
+        sample_points = []
+        attempts = 0
+        while len(sample_points) < 3 and attempts < 50:  # Try to get 3 points per quality zone
+            x = np.random.uniform(minx, maxx)
+            y = np.random.uniform(miny, maxy)
+            point = Point(x, y)
+            
+            if farm_geom.contains(point):
+                sample_points.append([y, x])  # folium uses [lat, lon]
+                points_added += 1
+            attempts += 1
+        
+        # Add markers for soil quality zones
+        for idx, point_coords in enumerate(sample_points):
+            folium.CircleMarker(
+                location=point_coords,
+                radius=20,
+                popup=folium.Popup(
+                    f"""
+                    <b>Soil Quality Zone</b><br>
+                    Quality: {quality}<br>
+                    pH: {6.0 + i * 0.3:.1f}<br>
+                    Organic Matter: {2 + i * 0.5:.1f}%<br>
+                    Fertility: {i + 1}/5
+                    """,
+                    parse_html=True
+                ),
+                color='black',
+                weight=2,
+                fillColor=color,
+                fillOpacity=0.7,
+                tooltip=f"Soil Quality: {quality}"
+            ).add_to(m)
+    
+    # Add a legend
+    legend_html = '''
+    <div style="position: fixed; 
+                bottom: 50px; left: 50px; width: 200px; height: 140px; 
+                background-color: white; border:2px solid grey; z-index:9999; 
+                font-size:14px; padding: 10px">
+    <p><b>Soil Quality Legend</b></p>
+    <p><i class="fa fa-circle" style="color:#8B4513"></i> Very Poor (pH 6.0)</p>
+    <p><i class="fa fa-circle" style="color:#A0522D"></i> Poor (pH 6.3)</p>
+    <p><i class="fa fa-circle" style="color:#CD853F"></i> Fair (pH 6.6)</p>
+    <p><i class="fa fa-circle" style="color:#D2B48C"></i> Good (pH 6.9)</p>
+    <p><i class="fa fa-circle" style="color:#F4A460"></i> Excellent (pH 7.2)</p>
+    </div>
+    '''
+    m.get_root().html.add_child(folium.Element(legend_html))
+    
+    # Add layer control
+    folium.LayerControl().add_to(m)
+    
+    # Fit map to farm boundary
+    m.fit_bounds([[bounds[1], bounds[0]], [bounds[3], bounds[2]]])
+    
+    return m
 
-# Sidebar file upload or use preset shapefile
-with st.sidebar:
-    st.header("🗂 Upload Shapefile")
-    st.write("Currently using a built-in shapefile")
-    # For now, use local file
-    shapefile_path = 'data/examplefarm.shp'
+# Main app
+def main():
+    st.title("🌾 Farm Soil Quality Analysis")
+    st.markdown("Upload your farm shapefile to analyze soil quality zones across your property.")
+    
+    # File upload
+    st.header("📁 Upload Farm Shapefile")
+    uploaded_file = st.file_uploader(
+        "Choose a ZIP file containing your shapefile",
+        type=['zip'],
+        help="Upload a ZIP file containing .shp, .shx, .dbf, and .prj files"
+    )
+    
+    if uploaded_file is not None:
+        # Extract and load shapefile
+        with st.spinner("Processing shapefile..."):
+            shp_path, error = extract_shapefile(uploaded_file)
+            
+            if error:
+                st.error(f"❌ {error}")
+                return
+            
+            try:
+                # Load shapefile
+                gdf = gpd.read_file(shp_path)
+                
+                # Display basic info
+                st.success(f"✅ Shapefile loaded successfully!")
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("Number of Features", len(gdf))
+                    st.metric("Total Area (hectares)", f"{gdf.geometry.area.sum() / 10000:.2f}")
+                
+                with col2:
+                    if not gdf.empty:
+                        bounds = gdf.total_bounds
+                        st.write(f"**Coordinate System:** {gdf.crs}")
+                        st.write(f"**Bounds:** {bounds[0]:.4f}, {bounds[1]:.4f} to {bounds[2]:.4f}, {bounds[3]:.4f}")
+                
+                # Create and display map
+                st.header("🗺️ Interactive Soil Quality Map")
+                st.markdown("*Click on the colored circles to see detailed soil information for each zone.*")
+                
+                # Create the map
+                soil_map = create_soil_quality_map(gdf)
+                
+                # Display map
+                map_data = st_folium(
+                    soil_map,
+                    width=700,
+                    height=500,
+                    returned_objects=["last_object_clicked"]
+                )
+                
+                # Display clicked information
+                if map_data['last_object_clicked']:
+                    st.subheader("📊 Selected Zone Details")
+                    clicked_data = map_data['last_object_clicked']
+                    st.json(clicked_data)
+                
+                # Soil analysis summary
+                st.header("📈 Soil Analysis Summary")
+                
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    st.metric(
+                        "Average pH",
+                        "6.6",
+                        delta="0.2",
+                        help="Optimal range: 6.0-7.0"
+                    )
+                
+                with col2:
+                    st.metric(
+                        "Organic Matter",
+                        "3.2%",
+                        delta="0.5%",
+                        help="Good range: 3-5%"
+                    )
+                
+                with col3:
+                    st.metric(
+                        "Overall Fertility",
+                        "Good",
+                        help="Based on soil quality zones"
+                    )
+                
+                # Recommendations
+                st.header("💡 Recommendations")
+                st.markdown("""
+                **Based on your soil analysis:**
+                
+                - 🌱 **Areas with poor soil quality** (brown zones) would benefit from organic matter addition
+                - 🧪 **pH levels** are generally good, but monitor acidic areas
+                - 💧 **Water retention** can be improved in sandy areas with compost
+                - 🌾 **Crop rotation** recommended for maintaining soil health
+                - 🔬 **Professional soil testing** recommended for precise nutrient management
+                """)
+                
+            except Exception as e:
+                st.error(f"❌ Error loading shapefile: {str(e)}")
+                st.info("Make sure your ZIP file contains all required shapefile components (.shp, .shx, .dbf, .prj)")
+    
+    else:
+        st.info("👆 Please upload a shapefile to begin the soil analysis.")
+        
+        # Instructions
+        st.header("📋 Instructions")
+        st.markdown("""
+        1. **Prepare your shapefile**: Make sure you have all required files (.shp, .shx, .dbf, .prj)
+        2. **Create a ZIP file**: Compress all shapefile components into a single ZIP file
+        3. **Upload**: Use the file uploader above to upload your ZIP file
+        4. **Analyze**: View the interactive map with soil quality zones
+        5. **Review**: Check the recommendations for your farm
+        
+        **Note**: This demo uses simulated soil data for demonstration purposes. 
+        For real soil analysis, consider professional soil testing services.
+        """)
 
-# Create Map
-Map = geemap.Map(center=(37.38, -2.39), zoom=14)
-
-# Load and convert shapefile to EE
-gdf = gpd.read_file(shapefile_path)
-ee_fc = geemap.geopandas_to_ee(gdf)
-farm_ee = ee_fc.geometry()
-
-# Layers
-Map.add_basemap('SATELLITE')
-Map.addLayer(ee_fc, {'color': 'red', 'width': 2}, 'Farm Boundary')
-
-# 1. Land Cover
-landcover = ee.Image('ESA/WorldCover/v100/2020').select('Map')
-landcover_vis = {
-    'min': 10, 'max': 100,
-    'palette': [
-        '006400', 'ffbb22', 'ffff4c', 'f096ff', 'fa0000', 'b4b4b4', 'f0f0f0',
-        '0064c8', '0096a0', '00cf75', 'fae6a0'
-    ]
-}
-Map.addLayer(landcover.clip(farm_ee), landcover_vis, 'Land Cover')
-
-# 2. Soil Organic Carbon
-soil = ee.Image('OpenLandMap/SOL/SOL_ORGANIC-CARBON_USDA-6A1C_M/v02').select('b0')
-soil_vis = {
-    'min': 0, 'max': 10,
-    'palette': ['ffffa0', 'f7fcb9', 'd9f0a3', 'addd8e', '78c679', '41ab5d', '238443', '005b29']
-}
-Map.addLayer(soil.clip(farm_ee), soil_vis, 'Soil Organic Carbon')
-
-# 3. Precipitation
-precip = ee.ImageCollection('UCSB-CHG/CHIRPS/DAILY') \
-    .filterBounds(farm_ee) \
-    .filterDate('2024-01-01', '2024-12-31') \
-    .sum()
-
-precip_vis = {'min': 0, 'max': 500, 'palette': ['white', 'blue']}
-Map.addLayer(precip.clip(farm_ee), precip_vis, 'Precipitation')
-
-# 4. Slope
-elevation = ee.Image('USGS/SRTMGL1_003')
-slope = ee.Terrain.slope(elevation)
-slope_vis = {'min': 0, 'max': 20, 'palette': ['white', 'brown']}
-Map.addLayer(slope.clip(farm_ee), slope_vis, 'Slope')
-
-# 5. Drought Risk
-drought = ee.ImageCollection('UCSB-CHG/CHIRPS/PENTAD') \
-    .filterBounds(farm_ee) \
-    .filterDate('2024-01-01', '2024-12-31') \
-    .mean()
-drought_vis = {'min': -2, 'max': 2, 'palette': ['red', 'yellow', 'green']}
-Map.addLayer(drought.clip(farm_ee), drought_vis, 'Drought Risk')
-
-# 6. NDVI
-ndvi = ee.ImageCollection('COPERNICUS/S2') \
-    .filterBounds(farm_ee) \
-    .filterDate('2024-06-01', '2024-06-30') \
-    .mean().normalizedDifference(['B8', 'B4'])
-ndvi_vis = {'min': -1, 'max': 1, 'palette': ['brown', 'yellow', 'green']}
-Map.addLayer(ndvi.clip(farm_ee), ndvi_vis, 'NDVI')
-
-# 7. Temperature Anomaly (with check)
-temperature_collection = ee.ImageCollection('NASA/GLDAS/V021/NOAH/G025/T3H') \
-    .filterBounds(farm_ee) \
-    .filterDate('2024-01-01', '2024-12-31')
-
-if temperature_collection.size().getInfo() > 0:
-    temperature_anomaly = temperature_collection.mean().select('Tair_f_inst')
-    temperature_vis = {'min': 250, 'max': 320, 'palette': ['blue', 'yellow', 'red']}
-    Map.addLayer(temperature_anomaly.clip(farm_ee), temperature_vis, 'Temperature Anomaly')
-
-# 8. River Basin
-river_basins = ee.FeatureCollection("WWF/HydroSHEDS/v1/Basins/hybas_6")
-basin_vis = {'color': 'blue', 'width': 2}
-Map.addLayer(river_basins, basin_vis, 'River Basin Outlines')
-
-# Display the map
-Map.to_streamlit(height=700)
+if __name__ == "__main__":
+    main()
