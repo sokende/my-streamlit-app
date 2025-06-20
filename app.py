@@ -179,6 +179,10 @@ def main():
             try:
                 # Load shapefile
                 gdf = gpd.read_file(shp_path)
+                # 🔄 Fix: Convert datetime columns to strings for JSON compatibility
+                gdf = gdf.copy()
+                for col in gdf.select_dtypes(include=['datetime64[ns]']).columns:
+                    gdf[col] = gdf[col].astype(str)
                 
                 # Display basic info
                 st.success(f"✅ Shapefile loaded successfully!")
